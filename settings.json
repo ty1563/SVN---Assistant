@@ -1,0 +1,18 @@
+{
+  "ota": {
+    "server_url": "https://api.svnagentic.site/ota",
+    "api_key": "",
+    "auto_update": true,
+    "check_interval": 3600
+  },
+  "detection": {
+    "model_name": "8-22k.pt",
+    "classifier_model": "speed_classifier.pth",
+    "frames_per_second": 5,
+    "input_size": 320,
+    "conf_threshold": 0.5,
+    "target_classes": [
+      "P.127"
+    ]
+  }
+}
