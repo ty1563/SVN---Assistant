@@ -20,8 +20,13 @@ class Dashboard:
         self.width = width
         self.height = height
         self.camera_size = (400, 300)
+        self.camera_offset = (20, 20)
         self.active_classes: Dict[str, bool] = {}
         self.selected_class_idx = 0
+        self.roi_start: Optional[tuple] = None
+        self.roi_end: Optional[tuple] = None
+        self.roi_drawing = False
+        self.roi_box: Optional[tuple] = None
         self._init_classes()
     
     def _init_classes(self):
@@ -49,19 +54,58 @@ class Dashboard:
             self.active_classes[name] = not self.active_classes[name]
             self._sync_settings()
             return True
+        elif key == ord('r') or key == ord('R'):
+            self.roi_box = None
+            return True
         return False
     
+    def handle_mouse(self, event: int, x: int, y: int, flags: int, param):
+        cx, cy = self.camera_offset
+        cw, ch = self.camera_size
+        
+        if not (cx <= x <= cx + cw and cy <= y <= cy + ch):
+            return
+        
+        lx, ly = x - cx, y - cy
+        
+        if event == cv2.EVENT_LBUTTONDOWN:
+            self.roi_drawing = True
+            self.roi_start = (lx, ly)
+            self.roi_end = (lx, ly)
+        elif event == cv2.EVENT_MOUSEMOVE and self.roi_drawing:
+            self.roi_end = (lx, ly)
+        elif event == cv2.EVENT_LBUTTONUP and self.roi_drawing:
+            self.roi_drawing = False
+            self.roi_end = (lx, ly)
+            x1, y1 = self.roi_start
+            x2, y2 = self.roi_end
+            if abs(x2 - x1) > 10 and abs(y2 - y1) > 10:
+                self.roi_box = (min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2))
+            else:
+                self.roi_box = None
+    
+    def get_frame_roi(self, frame_shape: tuple) -> Optional[tuple]:
+        if not self.roi_box:
+            return None
+        fh, fw = frame_shape[:2]
+        cw, ch = self.camera_size
+        sx, sy = fw / cw, fh / ch
+        rx1, ry1, rx2, ry2 = self.roi_box
+        return (int(rx1 * sx), int(ry1 * sy), int(rx2 * sx), int(ry2 * sy))
+    
+
     def render(
         self,
         camera_frame: np.ndarray,
         detections: list,
         time_ms: float,
         sign_results: List[str],
-        sign_progress: List[str]
+        sign_progress: List[str],
+        active_trackers: list = None
     ) -> np.ndarray:
         canvas = np.full((self.height, self.width, 3), self.BG_COLOR, dtype=np.uint8)
         
-        self._draw_camera_panel(canvas, camera_frame, detections)
+        self._draw_camera_panel(canvas, camera_frame, detections, active_trackers or [])
         self._draw_class_panel(canvas)
         self._draw_result_panel(canvas, sign_results, sign_progress)
         self._draw_stats_panel(canvas, time_ms, len(detections))
@@ -69,26 +113,32 @@ class Dashboard:
         
         return canvas
     
-    def _draw_camera_panel(self, canvas: np.ndarray, frame: np.ndarray, detections: list):
+    def _draw_camera_panel(self, canvas: np.ndarray, frame: np.ndarray, detections: list, trackers: list = None):
         x, y = 20, 20
         w, h = self.camera_size
+        fh, fw = frame.shape[:2]
+        sx, sy = w / fw, h / fh
         
         cv2.rectangle(canvas, (x-2, y-2), (x+w+2, y+h+2), self.ACCENT_COLOR, 2)
-        
         resized = cv2.resize(frame, (w, h))
         
         for det in detections:
             ox1, oy1, ox2, oy2 = det.bbox
-            fh, fw = frame.shape[:2]
-            sx, sy = w / fw, h / fh
-            x1, y1 = int(ox1 * sx), int(oy1 * sy)
-            x2, y2 = int(ox2 * sx), int(oy2 * sy)
-            cv2.rectangle(resized, (x1, y1), (x2, y2), self.ACTIVE_COLOR, 2)
-            cv2.putText(resized, f"{det.label}", (x1, y1 - 3), self.FONT, 0.4, self.ACTIVE_COLOR, 1)
+            dx1, dy1 = int(ox1 * sx), int(oy1 * sy)
+            dx2, dy2 = int(ox2 * sx), int(oy2 * sy)
+            cv2.rectangle(resized, (dx1, dy1), (dx2, dy2), self.ACTIVE_COLOR, 2)
+            cv2.putText(resized, det.label, (dx1, dy1 - 3), self.FONT, 0.4, self.ACTIVE_COLOR, 1)
+        
+        if self.roi_drawing and self.roi_start and self.roi_end:
+            cv2.rectangle(resized, self.roi_start, self.roi_end, (0, 255, 255), 2)
+        elif self.roi_box:
+            rx1, ry1, rx2, ry2 = self.roi_box
+            cv2.rectangle(resized, (rx1, ry1), (rx2, ry2), (0, 255, 255), 2)
         
         canvas[y:y+h, x:x+w] = resized
-        
-        cv2.putText(canvas, "CAMERA", (x, y + h + 20), self.FONT, 0.5, self.TEXT_COLOR, 1)
+        label = "CAMERA (R: Reset ROI)" if self.roi_box else "CAMERA (Drag to set ROI)"
+        cv2.putText(canvas, label, (x, y + h + 20), self.FONT, 0.5, self.TEXT_COLOR, 1)
+
     
     def _draw_class_panel(self, canvas: np.ndarray):
         x, y = 450, 20

@@ -1,8 +1,9 @@
 import os
+import json
 from dataclasses import dataclass
 from typing import List, Optional
-from config.constants import MODELS_DIR, MODEL_EXTENSION
-from core.detector import Detector
+from config.constants import MODELS_DIR
+from core.onnx_detector import ONNXDetector, Detection
 from utils.logger import log
 from utils.file_handler import FileHandler
 
@@ -16,10 +17,16 @@ class LocalModel:
 
 
 class ModelService:
+    SUPPORTED_EXTENSIONS = ('.onnx',)
+    
     def __init__(self):
-        self.detector = Detector()
+        self._detector: Optional[ONNXDetector] = None
         self._current_model: Optional[LocalModel] = None
         FileHandler.ensure_dir(MODELS_DIR)
+    
+    @property
+    def detector(self) -> Optional[ONNXDetector]:
+        return self._detector
     
     @property
     def current_model(self) -> Optional[LocalModel]:
@@ -28,7 +35,7 @@ class ModelService:
     def list_models(self) -> List[LocalModel]:
         models = []
         for f in os.listdir(MODELS_DIR):
-            if f.endswith(MODEL_EXTENSION):
+            if f.endswith(self.SUPPORTED_EXTENSIONS):
                 path = os.path.join(MODELS_DIR, f)
                 models.append(LocalModel(
                     name=f,
@@ -38,9 +45,22 @@ class ModelService:
                 ))
         return models
     
+    def _load_class_names(self, model_name: str) -> List[str]:
+        base_name = os.path.splitext(model_name)[0]
+        json_path = os.path.join(MODELS_DIR, f"{base_name}.json")
+        if os.path.exists(json_path):
+            with open(json_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                return data.get('names', [])
+        return []
+    
     def load_model(self, model_name: str) -> bool:
-        if not model_name.endswith(MODEL_EXTENSION):
-            model_name += MODEL_EXTENSION
+        if not model_name.endswith(self.SUPPORTED_EXTENSIONS):
+            for ext in self.SUPPORTED_EXTENSIONS:
+                test_path = os.path.join(MODELS_DIR, model_name + ext)
+                if os.path.exists(test_path):
+                    model_name += ext
+                    break
         
         path = os.path.join(MODELS_DIR, model_name)
         
@@ -48,7 +68,11 @@ class ModelService:
             log.error(f"Model not found: {path}")
             return False
         
-        if self.detector.load(path):
+        self._detector = ONNXDetector()
+        class_names = self._load_class_names(model_name)
+        success = self._detector.load(path, class_names)
+        
+        if success:
             self._current_model = LocalModel(
                 name=model_name,
                 path=path,
@@ -59,11 +83,13 @@ class ModelService:
         return False
     
     def switch_model(self, model_name: str) -> bool:
-        self.detector.unload()
+        self.unload()
         return self.load_model(model_name)
     
     def unload(self):
-        self.detector.unload()
+        if self._detector:
+            self._detector.unload()
+        self._detector = None
         self._current_model = None
     
     def delete_model(self, model_name: str) -> bool:
@@ -73,3 +99,4 @@ class ModelService:
         
         path = os.path.join(MODELS_DIR, model_name)
         return FileHandler.safe_delete(path)
+

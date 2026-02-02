@@ -23,6 +23,7 @@ class DetectionConfig:
     input_size: int = 320
     conf_threshold: float = 0.5
     target_classes: list = field(default_factory=lambda: ["P.127"])
+    exclude_classes: list = field(default_factory=list)
 
 
 @dataclass

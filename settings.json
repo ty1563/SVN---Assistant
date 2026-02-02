@@ -6,13 +6,16 @@
     "check_interval": 3600
   },
   "detection": {
-    "model_name": "8-22k.pt",
+    "model_name": "8-22k.onnx",
     "classifier_model": "speed_classifier.pth",
-    "frames_per_second": 5,
+    "frames_per_second": 30,
     "input_size": 320,
     "conf_threshold": 0.5,
     "target_classes": [
       "P.127"
+    ],
+    "exclude_classes": [
+      "P.115"
     ]
   }
 }

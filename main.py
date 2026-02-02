@@ -44,13 +44,15 @@ class Application:
         
         cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
         cv2.resizeWindow(WINDOW_NAME, 1280, 720)
+        cv2.setMouseCallback(WINDOW_NAME, self.dashboard.handle_mouse)
         
         try:
-            for frame, detections, time_ms in processor.stream_camera():
+            for frame, detections, time_ms in processor.stream_camera(self.dashboard.get_frame_roi):
                 display = self.dashboard.render(
                     frame, detections, time_ms,
                     processor.sign_state.results,
-                    processor.sign_state.progress_list
+                    processor.sign_state.progress_list,
+                    processor.sign_state.active_trackers
                 )
                 cv2.imshow(WINDOW_NAME, display)
                 
@@ -73,13 +75,15 @@ class Application:
         
         cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
         cv2.resizeWindow(WINDOW_NAME, 1280, 720)
+        cv2.setMouseCallback(WINDOW_NAME, self.dashboard.handle_mouse)
         
         try:
-            for frame, detections, time_ms in processor.stream_video():
+            for frame, detections, time_ms in processor.stream_video(self.dashboard.get_frame_roi):
                 display = self.dashboard.render(
                     frame, detections, time_ms,
                     processor.sign_state.results,
-                    processor.sign_state.progress_list
+                    processor.sign_state.progress_list,
+                    processor.sign_state.active_trackers
                 )
                 cv2.imshow(WINDOW_NAME, display)
                 

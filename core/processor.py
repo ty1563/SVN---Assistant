@@ -4,25 +4,35 @@ import os
 import numpy as np
 from collections import Counter
 from typing import Optional, Generator, Tuple, List, Dict
-from core.detector import Detector, Detection
+from core.onnx_detector import ONNXDetector, Detection
 from core.classifier import SpeedClassifier
 from config.settings import Settings
 from config.constants import MODELS_DIR
 
 
 class SignTracker:
+    MAX_HISTORY = 30
+    
     def __init__(self, sign_id: int, votes_needed: int = 5):
         self.sign_id = sign_id
         self.votes_needed = votes_needed
         self.votes: List[str] = []
         self.final_result: Optional[str] = None
         self.last_seen = time.time()
+        self.center: tuple = (0, 0)
+        self.history: List[tuple] = []
+    
+    def update_position(self, center: tuple):
+        self.center = center
+        self.history.append(center)
+        if len(self.history) > self.MAX_HISTORY:
+            self.history.pop(0)
+        self.last_seen = time.time()
     
     def add_vote(self, label: str, instant_complete: bool = False):
         if self.final_result:
             return
         self.votes.append(label)
-        self.last_seen = time.time()
         if instant_complete or len(self.votes) >= self.votes_needed:
             self.final_result = Counter(self.votes).most_common(1)[0][0]
     
@@ -36,6 +46,8 @@ class SignTracker:
 
 
 class MultiSignState:
+    MAX_DISPLAY = 5
+    
     def __init__(self, votes_needed: int = 5, timeout: float = 2.0):
         self.votes_needed = votes_needed
         self.timeout = timeout
@@ -44,17 +56,17 @@ class MultiSignState:
     
     def _get_tracker_id(self, bbox: tuple) -> int:
         cx, cy = (bbox[0] + bbox[2]) // 2, (bbox[1] + bbox[3]) // 2
-        for tid, tracker in self.trackers.items():
-            if hasattr(tracker, 'center'):
-                dx, dy = abs(cx - tracker.center[0]), abs(cy - tracker.center[1])
-                if dx < 100 and dy < 100:
-                    tracker.center = (cx, cy)
-                    return tid
+        for tid, t in self.trackers.items():
+            dx, dy = abs(cx - t.center[0]), abs(cy - t.center[1])
+            if dx < 100 and dy < 100:
+                t.update_position((cx, cy))
+                return tid
         
         new_id = self._next_id
         self._next_id += 1
-        self.trackers[new_id] = SignTracker(new_id, self.votes_needed)
-        self.trackers[new_id].center = (cx, cy)
+        tracker = SignTracker(new_id, self.votes_needed)
+        tracker.update_position((cx, cy))
+        self.trackers[new_id] = tracker
         return new_id
     
     def add_vote(self, bbox: tuple, label: str, instant_complete: bool = False):
@@ -69,11 +81,17 @@ class MultiSignState:
     
     @property
     def results(self) -> List[str]:
-        return [t.final_result for t in self.trackers.values() if t.is_complete]
+        completed = [t for t in self.trackers.values() if t.is_complete]
+        return [t.final_result for t in sorted(completed, key=lambda x: x.last_seen, reverse=True)[:self.MAX_DISPLAY]]
     
     @property
     def progress_list(self) -> List[str]:
-        return [t.progress for t in self.trackers.values() if not t.is_complete]
+        active = [t for t in self.trackers.values() if not t.is_complete]
+        return [t.progress for t in sorted(active, key=lambda x: x.last_seen, reverse=True)[:self.MAX_DISPLAY]]
+    
+    @property
+    def active_trackers(self) -> List:
+        return sorted([t for t in self.trackers.values() if not t.is_complete], key=lambda x: x.last_seen, reverse=True)[:self.MAX_DISPLAY]
     
     def reset(self):
         self.trackers.clear()
@@ -86,7 +104,7 @@ class FrameProcessor:
         self.detector = detector
         self.settings = settings
         self.classifier: Optional[SpeedClassifier] = None
-        self.sign_state = MultiSignState(votes_needed=5)
+        self.sign_state = MultiSignState(votes_needed=3)
         self._cap: Optional[cv2.VideoCapture] = None
         self._stats = {"total": [], "yolo": []}
         self._init_classifier()
@@ -125,6 +143,9 @@ class FrameProcessor:
         return max(1, int(video_fps / self.fps))
     
     def _process_detections(self, frame: np.ndarray, detections: List[Detection]) -> List[Detection]:
+        exclude_classes = self.settings.detection.exclude_classes
+        detections = [d for d in detections if d.label not in exclude_classes]
+        
         active_classes = self.settings.detection.target_classes
         filtered = [d for d in detections if d.label in active_classes] if active_classes else detections
         
@@ -144,20 +165,34 @@ class FrameProcessor:
         self.sign_state.cleanup()
         return filtered
     
-    def process_frame(self, frame: np.ndarray) -> Tuple[List[Detection], float]:
+    def process_frame(self, frame: np.ndarray, roi: Optional[tuple] = None) -> Tuple[List[Detection], float]:
         t0 = time.perf_counter()
+        
+        if roi:
+            rx1, ry1, rx2, ry2 = roi
+            cropped = frame[ry1:ry2, rx1:rx2]
+        else:
+            cropped = frame
+            rx1, ry1 = 0, 0
+        
         detections = self.detector.detect(
-            frame,
+            cropped,
             conf=self.settings.detection.conf_threshold,
             imgsz=self.settings.detection.input_size
         )
+        
+        if roi:
+            for det in detections:
+                ox1, oy1, ox2, oy2 = det.bbox
+                det.bbox = (ox1 + rx1, oy1 + ry1, ox2 + rx1, oy2 + ry1)
         
         detections = self._process_detections(frame, detections)
         time_ms = (time.perf_counter() - t0) * 1000
         self._stats["total"].append(time_ms)
         return detections, time_ms
+
     
-    def stream_camera(self) -> Generator[Tuple[np.ndarray, List[Detection], float], None, None]:
+    def stream_camera(self, roi_getter=None) -> Generator[Tuple[np.ndarray, List[Detection], float], None, None]:
         if not self._cap:
             return
         
@@ -174,10 +209,11 @@ class FrameProcessor:
                 continue
             last_time = now
             
-            detections, time_ms = self.process_frame(frame)
+            roi = roi_getter(frame.shape) if roi_getter else None
+            detections, time_ms = self.process_frame(frame, roi)
             yield frame, detections, time_ms
     
-    def stream_video(self) -> Generator[Tuple[np.ndarray, List[Detection], float], None, None]:
+    def stream_video(self, roi_getter=None) -> Generator[Tuple[np.ndarray, List[Detection], float], None, None]:
         if not self._cap:
             return
         
@@ -193,7 +229,8 @@ class FrameProcessor:
             if frame_idx % skip != 0:
                 continue
             
-            detections, time_ms = self.process_frame(frame)
+            roi = roi_getter(frame.shape) if roi_getter else None
+            detections, time_ms = self.process_frame(frame, roi)
             yield frame, detections, time_ms
     
     def get_avg_time(self) -> float:
